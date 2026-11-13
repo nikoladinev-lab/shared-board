@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Споделена Дъска (PeerJS)</title>
+    <!-- Зареждаме PeerJS библиотеката от CDN -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body { margin: 0; padding: 0; background: #1e1e2e; color: #cdd6f4; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        /* Горен панел за връзка */
+        .header {
+            background: #181825; padding: 10px 15px; display: flex; flex-wrap: wrap; 
+            gap: 10px; align-items: center; justify-content: space-between; border-bottom: 1px solid #313244;
+        }
+        .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        input[type="text"] {
+            padding: 8px 12px; border-radius: 6px; border: 1px solid #45475a;
+            background: #313244; color: white; width: 160px; font-size: 14px;
+        }
+        button {
+            padding: 8px 14px; border-radius: 6px; border: none; cursor: pointer;
+            font-weight: bold; font-size: 14px; transition: 0.2s;
+        }
+        .btn-primary { background: #89b4fa; color: #11111b; }
+        .btn-primary:hover { background: #b4befe; }
+        .btn-danger { background: #f38ba8; color: #11111b; }
+        .btn-copy { background: #a6e3a1; color: #11111b; }
+        
+        .status-badge {
+            padding: 5px 10px; border-radius: 20px; font-size: 13px; background: #313244;
+        }
+        .tools { display: flex; gap: 10px; align-items: center; }
+        input[type="color"] { border: none; width: 35px; height: 35px; cursor: pointer; background: none; }
+        
+        /* Платно за рисуване */
+        #board { flex-grow: 1; background: #ffffff; cursor: crosshair; touch-action: none; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="controls">
+        <span class="status-badge" id="status">Свързване към сървъра...</span>
+        <button class="btn-copy" id="copyBtn" onclick="copyMyId()" style="display:none;">Копирай моето ID</button>
+        <input type="text" id="hostIdInput" placeholder="Въведи ID на стаята...">
+        <button class="btn-primary" onclick="joinRoom()">Свържи се</button>
+    </div>
+
+    <div class="tools">
+        <label>Цвят: <input type="color" id="colorPicker" value="#ff0055"></label>
+        <button class="btn-danger" onclick="clearBoard(true)">Изчисти</button>
+        <span class="status-badge">Устройства: <strong id="peerCount">1</strong></span>
+    </div>
+</div>
+
+<canvas id="board"></canvas>
+
+<script>
+    const canvas = document.getElementById('board');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const peerCountEl = document.getElementById('peerCount');
+    const colorPicker = document.getElementById('colorPicker');
+
+    // Генерираме кратко 5-символно ID, за да се въвежда лесно от телефон
+    const shortId = Math.random().toString(36).substring(2, 7).toUpperCase();
+    const peer = new Peer(shortId);
+
+    let connections = []; // Списък с всички свързани устройства
+    let isDrawing = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    // Настройка на размера на платното
+    function resizeCanvas() {
+        const temp = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        canvas.width = window.innerWidth;
+        canvas.height = document.body.clientHeight - document.querySelector('.header').offsetHeight;
+        ctx.putImageData(temp, 0, 0);
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // 1. Когато устройството се регистрира успешно в PeerJS
+    peer.on('open', (id) => {
+        statusEl.innerHTML = `Твоето ID: <strong>${id}</strong>`;
+        document.getElementById('copyBtn').style.display = 'inline-block';
+    });
+
+    // 2. Когато ДРУГО устройство се свърже към нас (ние сме Host)
+    peer.on('connection', (conn) => {
+        setupConnection(conn);
+    });
+
+    // 3. Когато НИЕ се свързваме към чуждо ID (ние сме Client)
+    function joinRoom() {
+        const hostId = document.getElementById('hostIdInput').value.trim().toUpperCase();
+        if (!hostId || hostId === peer.id) return;
+        const conn = peer.connect(hostId);
+        setupConnection(conn);
+    }
+
+    // Управление на връзката и препращане на данни (Relay за 3+ устройства)
+    function setupConnection(conn) {
+        conn.on('open', () => {
+            if (!connections.find(c => c.peer === conn.peer)) {
+                connections.push(conn);
+                updatePeerCount();
+            }
+            statusEl.innerHTML = `Свързан! (ID: <strong>${peer.id}</strong>)`;
+        });
+
+        conn.on('data', (data) => {
+            if (data.type === 'draw') {
+                drawLine(data.x0, data.y0, data.x1, data.y1, data.color, false);
+            } else if (data.type === 'clear') {
+                clearBoard(false);
+            }
+            // Ако сме Host, препращаме данните към всички останали свързани устройства!
+            broadcast(data, conn.peer);
+        });
+
+        conn.on('close', () => {
+            connections = connections.filter(c => c.peer !== conn.peer);
+            updatePeerCount();
+        });
+    }
+
+    function broadcast(data, excludePeerId = null) {
+        connections.forEach(conn => {
+            if (conn.open && conn.peer !== excludePeerId) {
+                conn.send(data);
+            }
+        });
+    }
+
+    function updatePeerCount() {
+        peerCountEl.innerText = connections.length + 1;
+    }
+
+    function copyMyId() {
+        navigator.clipboard.writeText(peer.id);
+        alert("ID-то " + peer.id + " е копирано!");
+    }
+
+    // Логика за рисуване (мишка + тъчскрийн за телефони)
+    function getCoords(e) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        return { x: clientX - rect.left, y: clientY - rect.top };
+    }
+
+    function startDraw(e) {
+        isDrawing = true;
+        const coords = getCoords(e);
+        lastX = coords.x;
+        lastY = coords.y;
+    }
+
+    function moveDraw(e) {
+        if (!isDrawing) return;
+        e.preventDefault();
+        const coords = getCoords(e);
+        drawLine(lastX, lastY, coords.x, coords.y, colorPicker.value, true);
+        lastX = coords.x;
+        lastY = coords.y;
+    }
+
+    function endDraw() { isDrawing = false; }
+
+    function drawLine(x0, y0, x1, y1, color, emit) {
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        ctx.closePath();
+
+        if (emit) {
+            broadcast({ type: 'draw', x0, y0, x1, y1, color });
+        }
+    }
+
+    function clearBoard(emit) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (emit) broadcast({ type: 'clear' });
+    }
+
+    canvas.addEventListener('mousedown', startDraw);
+    canvas.addEventListener('mousemove', moveDraw);
+    window.addEventListener('mouseup', endDraw);
+
+    canvas.addEventListener('touchstart', startDraw, { passive: false });
+    canvas.addEventListener('touchmove', moveDraw, { passive: false });
+    window.addEventListener('touchend', endDraw);
+</script>
+</body>
+</html>
